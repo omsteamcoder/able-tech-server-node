@@ -92,43 +92,139 @@ export const createMenuItem = async (req, res) => {
 //     session.endSession();
 //   }
 // };
-
+// Enhanced updateMenuItem to handle hierarchy changes
 export const updateMenuItem = async (req, res) => {
-  try {
-    const { id, name, link } = req.body;
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    // Validate input
-    if (!id || !name || !link) {
+  try {
+    const { id, title, link, parent, level, order } = req.body;
+
+    if (!id || !title) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // Update only the name and link
-    const updatedItem = await MenuItem.findByIdAndUpdate(
-      id,
-      { name, link },
-      { new: true } // Return the updated document
-    );
-
-    if (!updatedItem) {
-      return res.status(404).json({ message: "Menu item not found" });
+    const movedItem = await MenuItem.findById(id).session(session);
+    if (!movedItem) {
+      return res.status(404).json({ message: "Item not found" });
     }
 
+    // Check for circular reference
+    if (parent && (await isCircularReference(id, parent))) {
+      return res
+        .status(400)
+        .json({ message: "Cannot set item as parent of its own descendant" });
+    }
+
+    const parentChanged = movedItem.parent?.toString() !== parent;
+    const levelChanged = movedItem.level !== level;
+
+    // Update the item
+    const updatedItem = await MenuItem.findByIdAndUpdate(
+      id,
+      { title, link, parent: parent || null, level, order },
+      { new: true, session }
+    );
+
+    // Update descendants if parent or level changed
+    if (parentChanged || levelChanged) {
+      await updateDescendants(updatedItem._id, updatedItem.level, session);
+    }
+
+    // Adjust sibling orders
+    await adjustSiblingOrders(updatedItem.parent, session);
+
+    await session.commitTransaction();
     res.status(200).json(updatedItem);
   } catch (error) {
+    await session.abortTransaction();
     res.status(500).json({ message: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+// Check for circular references
+const isCircularReference = async (itemId, potentialParentId) => {
+  if (itemId.toString() === potentialParentId.toString()) {
+    return true;
+  }
+
+  let currentParentId = potentialParentId;
+  while (currentParentId) {
+    const parent = await MenuItem.findById(currentParentId);
+    if (!parent) break;
+
+    if (parent._id.toString() === itemId.toString()) {
+      return true;
+    }
+
+    currentParentId = parent.parent;
+  }
+
+  return false;
+};
+
+// Update descendants' levels
+const updateDescendants = async (parentId, parentLevel, session) => {
+  const children = await MenuItem.find({ parent: parentId }).session(session);
+
+  for (const child of children) {
+    await MenuItem.findByIdAndUpdate(
+      child._id,
+      { level: parentLevel + 1 },
+      { session }
+    );
+
+    // Recursively update grandchildren
+    await updateDescendants(child._id, parentLevel + 1, session);
   }
 };
 
 export const deleteMenuItem = async (req, res) => {
-  console.log(req.query);
-
-  const { id } = req.query; // Change to req.params for REST consistency
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
   try {
-    await MenuItem.findByIdAndDelete(id);
-    res.status(200).json({ message: "Menu item deleted" });
+    const { id } = req.params; // Changed from req.query to req.params
+
+    if (!id) {
+      return res.status(400).json({ message: "Item ID is required" });
+    }
+
+    // Find the item and its descendants
+    const itemToDelete = await MenuItem.findById(id).session(session);
+    if (!itemToDelete) {
+      return res.status(404).json({ message: "Menu item not found" });
+    }
+
+    // Recursively delete all descendants
+    await deleteDescendants(id, session);
+
+    // Delete the main item
+    await MenuItem.findByIdAndDelete(id, { session });
+
+    // Adjust orders of remaining siblings
+    await adjustSiblingOrders(itemToDelete.parent, session);
+
+    await session.commitTransaction();
+    res
+      .status(200)
+      .json({ message: "Menu item and its children deleted successfully" });
   } catch (error) {
+    await session.abortTransaction();
     res.status(500).json({ message: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+// Recursively delete descendants
+const deleteDescendants = async (parentId, session) => {
+  const children = await MenuItem.find({ parent: parentId }).session(session);
+
+  for (const child of children) {
+    await deleteDescendants(child._id, session);
+    await MenuItem.findByIdAndDelete(child._id, { session });
   }
 };
 
