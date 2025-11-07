@@ -30,7 +30,6 @@ function buildMenuHierarchy(items) {
   return hierarchy;
 }
 
-// Create a new menu item
 export const createMenuItem = async (req, res) => {
   const { title, link, parent = null } = req.body;
 
@@ -50,50 +49,23 @@ export const createMenuItem = async (req, res) => {
       level,
       order,
     });
-    res.status(201).json(newItem);
+
+    // FIX: Return consistent response format
+    res.status(201).json({
+      success: true,
+      data: newItem,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
-
-// Update an existing menu item
-
-// export const updateMenuItem = async (req, res) => {
-//   const session = await mongoose.startSession();
-//   session.startTransaction();
-
-//   try {
-//     const { id, name, link, parent, level, order } = req.body;
-//     const movedItem = await MenuItem.findById(id).session(session);
-
-//     if (!movedItem) return res.status(404).json({ message: "Item not found" });
-
-//     const parentChanged = movedItem.parent?.toString() !== parent;
-//     const levelChanged = movedItem.level !== level;
-
-//     const updatedItem = await MenuItem.findByIdAndUpdate(
-//       id,
-//       { name, link, parent, level, order },
-//       { new: true, session }
-//     );
-
-//     if (parentChanged || levelChanged) {
-//       await updateDescendants(updatedItem._id, updatedItem.level, session);
-//     }
-
-//     await adjustSiblingOrders(updatedItem.parent, session);
-
-//     await session.commitTransaction();
-//     res.status(200).json(updatedItem);
-//   } catch (error) {
-//     await session.abortTransaction();
-//     res.status(500).json({ message: error.message });
-//   } finally {
-//     session.endSession();
-//   }
-// };
-// Enhanced updateMenuItem to handle hierarchy changes
+// Enhanced updateMenuItem to handle hierarchy changes - FIXED
 export const updateMenuItem = async (req, res) => {
+  console.log("hehehjdsjdnksda ", req.body);
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -116,13 +88,20 @@ export const updateMenuItem = async (req, res) => {
         .json({ message: "Cannot set item as parent of its own descendant" });
     }
 
+    // FIX: Calculate correct level based on parent
+    let actualLevel = 0;
+    if (parent) {
+      const parentItem = await MenuItem.findById(parent).session(session);
+      actualLevel = parentItem ? parentItem.level + 1 : 0;
+    }
+
     const parentChanged = movedItem.parent?.toString() !== parent;
-    const levelChanged = movedItem.level !== level;
+    const levelChanged = movedItem.level !== actualLevel;
 
     // Update the item
     const updatedItem = await MenuItem.findByIdAndUpdate(
       id,
-      { title, link, parent: parent || null, level, order },
+      { title, link, parent: parent || null, level: actualLevel, order },
       { new: true, session }
     );
 
@@ -135,12 +114,73 @@ export const updateMenuItem = async (req, res) => {
     await adjustSiblingOrders(updatedItem.parent, session);
 
     await session.commitTransaction();
-    res.status(200).json(updatedItem);
+    res.status(200).json({
+      success: true, // ADD THIS
+      data: updatedItem,
+    });
   } catch (error) {
     await session.abortTransaction();
     res.status(500).json({ message: error.message });
   } finally {
     session.endSession();
+  }
+};
+
+// menuController.js - UPDATE this function
+const updateChildLevelsAndParents = async (
+  parentId,
+  level,
+  children,
+  session
+) => {
+  if (!Array.isArray(children)) return;
+
+  for (const child of children) {
+    if (!child._id) {
+      console.error("Child item missing _id:", child);
+      continue;
+    }
+
+    console.log(`Updating child ID: ${child._id}`);
+    console.log(
+      `Details - Title: ${child.title}, Link: ${child.link}, New Parent: ${parentId}, Level: ${level}, Order: ${child.order}`
+    );
+
+    try {
+      // FIX: Calculate correct level based on parent
+      const childLevel = level;
+
+      // Update each child with new parent, level, order, and link
+      await MenuItem.findByIdAndUpdate(
+        child._id,
+        {
+          title: child.title,
+          parent: parentId,
+          level: childLevel,
+          order: child.order,
+          link: child.link,
+        },
+        { session }
+      );
+
+      console.log(
+        `Updated child: ${child.title} (ID: ${child._id}) with Parent: ${parentId}, Level: ${childLevel}, Order: ${child.order}`
+      );
+
+      // Recursively update if the child has its own children
+      if (child.children && child.children.length > 0) {
+        await updateChildLevelsAndParents(
+          child._id,
+          childLevel + 1,
+          child.children,
+          session
+        );
+      }
+    } catch (error) {
+      console.error(
+        `Error updating child ID: ${child._id}, Error: ${error.message}`
+      );
+    }
   }
 };
 
@@ -208,9 +248,10 @@ export const deleteMenuItem = async (req, res) => {
     await adjustSiblingOrders(itemToDelete.parent, session);
 
     await session.commitTransaction();
-    res
-      .status(200)
-      .json({ message: "Menu item and its children deleted successfully" });
+    res.status(200).json({
+      success: true, // ADD THIS
+      message: "Menu item and its children deleted successfully",
+    });
   } catch (error) {
     await session.abortTransaction();
     res.status(500).json({ message: error.message });
@@ -228,31 +269,43 @@ const deleteDescendants = async (parentId, session) => {
   }
 };
 
-// Adjust sibling orders after an item has been moved
+// Adjust sibling orders after an item has been moved - ENHANCED
 const adjustSiblingOrders = async (parentId, session) => {
-  const siblings = await MenuItem.find({ parent: parentId })
-    .sort({ order: 1 })
-    .session(session);
-  for (let i = 0; i < siblings.length; i++) {
-    await MenuItem.findByIdAndUpdate(
-      siblings[i]._id,
-      { order: i + 1 },
-      { session }
-    );
+  try {
+    const siblings = await MenuItem.find({ parent: parentId })
+      .sort({ order: 1 })
+      .session(session);
+
+    for (let i = 0; i < siblings.length; i++) {
+      await MenuItem.findByIdAndUpdate(
+        siblings[i]._id,
+        { order: i + 1 },
+        { session }
+      );
+    }
+  } catch (error) {
+    console.error("Error adjusting sibling orders:", error);
+    throw error;
   }
 };
-
-// Update the entire menu structure
+// menuController.js - UPDATE updateMenuStructure function
 export const updateMenuStructure = async (req, res) => {
-  const { menu } = req.body;
-  console.log("Received menu structure:", menu);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
   try {
+    const { menu } = req.body;
+    console.log("Received menu structure:", menu);
+
+    if (!Array.isArray(menu)) {
+      return res.status(400).json({ message: "Menu must be an array" });
+    }
+
     // Process each item in the menu structure to update hierarchy
     for (const item of menu) {
       if (!item._id) {
         console.error("Error: Item missing _id:", item);
-        continue; // Skip items without an _id
+        continue;
       }
 
       console.log(`Updating item ID: ${item._id}`);
@@ -262,94 +315,157 @@ export const updateMenuStructure = async (req, res) => {
         }, Level: ${item.level}, Order: ${item.order}`
       );
 
+      // FIX: Validate level consistency
+      let actualLevel = 0;
+      if (item.parent) {
+        const parentItem = await MenuItem.findById(item.parent).session(
+          session
+        );
+        if (parentItem) {
+          actualLevel = parentItem.level + 1;
+        } else {
+          // If parent doesn't exist, treat as root level
+          actualLevel = 0;
+        }
+      }
+
+      // FIX: Ensure level matches parent relationship
+      if (item.parent && actualLevel !== item.level) {
+        console.warn(
+          `Correcting level for item ${item._id} from ${item.level} to ${actualLevel}`
+        );
+      }
+
       // Update the item with the new parent relationship, order, level, and link
-      await MenuItem.findByIdAndUpdate(item._id, {
-        parent: item.parent || null,
-        order: item.order,
-        level: item.level,
-        link: item.link,
-      });
+      await MenuItem.findByIdAndUpdate(
+        item._id,
+        {
+          title: item.title,
+          parent: item.parent || null,
+          order: item.order,
+          level: actualLevel, // Use calculated level instead of provided level
+          link: item.link,
+        },
+        { session }
+      );
 
       console.log(
         `Updated item: ${item.title} (ID: ${item._id}) with Parent: ${
           item.parent || "null"
-        }, Level: ${item.level}, Order: ${item.order}`
+        }, Level: ${actualLevel}, Order: ${item.order}`
       );
 
       // If this item has children, recursively update their levels and parents
       if (item.children && item.children.length > 0) {
         await updateChildLevelsAndParents(
           item._id,
-          item.level + 1,
-          item.children
+          actualLevel + 1,
+          item.children,
+          session
         );
       }
     }
 
-    res.status(200).json({ message: "Menu structure updated successfully" });
+    await session.commitTransaction();
+    res.status(200).json({
+      success: true, // ADD THIS for frontend validation
+      message: "Menu structure updated successfully",
+    });
   } catch (error) {
+    await session.abortTransaction();
     console.error("Error updating menu structure:", error.message);
-    res
-      .status(500)
-      .json({ message: "Error updating menu structure", error: error.message });
+    res.status(500).json({
+      success: false, // ADD THIS for frontend validation
+      message: "Error updating menu structure",
+      error: error.message,
+    });
+  } finally {
+    session.endSession();
   }
 };
 
-// Recursive function to update levels and parent relationships for children
-const updateChildLevelsAndParents = async (parentId, level, children) => {
-  for (const child of children) {
-    if (!child._id) {
-      console.error("Child item missing _id:", child);
-      continue;
+export const updateMenuOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { draggedId, targetId, position } = req.body; // position: 'before', 'after', 'into'
+
+    if (!draggedId || !targetId) {
+      return res.status(400).json({ message: "Missing required parameters" });
     }
 
-    console.log(`Updating child ID: ${child._id}`);
-    console.log(
-      `Details - Name: ${child.name}, Link: ${child.link}, New Parent: ${parentId}, Level: ${level}, Order: ${child.order}`
+    const draggedItem = await MenuItem.findById(draggedId).session(session);
+    const targetItem = await MenuItem.findById(targetId).session(session);
+
+    if (!draggedItem || !targetItem) {
+      return res.status(404).json({ message: "Menu item not found" });
+    }
+
+    let newParent = null;
+    let newLevel = 0;
+    let newOrder = 0;
+
+    switch (position) {
+      case "before":
+      case "after":
+        newParent = targetItem.parent;
+        newLevel = targetItem.level;
+        // Get siblings to calculate order
+        const siblings = await MenuItem.find({ parent: newParent })
+          .sort({ order: 1 })
+          .session(session);
+
+        const targetIndex = siblings.findIndex(
+          (sib) => sib._id.toString() === targetId
+        );
+        newOrder = position === "before" ? targetIndex : targetIndex + 1;
+        break;
+
+      case "into":
+        newParent = targetId;
+        newLevel = targetItem.level + 1;
+        // Get children count for order
+        const childrenCount = await MenuItem.countDocuments({
+          parent: targetId,
+        }).session(session);
+        newOrder = childrenCount;
+        break;
+
+      default:
+        return res.status(400).json({ message: "Invalid position" });
+    }
+
+    // Update the dragged item
+    await MenuItem.findByIdAndUpdate(
+      draggedId,
+      {
+        parent: newParent,
+        level: newLevel,
+        order: newOrder,
+      },
+      { session }
     );
 
-    try {
-      // Update each child with new parent, level, order, and link
-      await MenuItem.findByIdAndUpdate(child._id, {
-        parent: parentId,
-        level: level,
-        order: child.order,
-        link: child.link,
-      });
-
-      console.log(
-        `Updated child: ${child.name} (ID: ${child._id}) with Parent: ${parentId}, Level: ${level}, Order: ${child.order}`
-      );
-
-      // Recursively update if the child has its own children
-      if (child.children && child.children.length > 0) {
-        await updateChildLevelsAndParents(child._id, level + 1, child.children);
-      }
-    } catch (error) {
-      console.error(
-        `Error updating child ID: ${child._id}, Error: ${error.message}`
-      );
-    }
-  }
-};
-
-// Update menu order after drag & drop
-export const updateMenuOrder = async (req, res) => {
-  try {
-    const { menuOrder } = req.body;
-
-    // Update each menu item with its new position
-    for (const item of menuOrder) {
-      await MenuItem.findByIdAndUpdate(item.id, {
-        order: item.position,
-        parent: item.parent || null,
-      });
+    // Reorder all affected items
+    await adjustSiblingOrders(newParent, session);
+    if (draggedItem.parent !== newParent) {
+      await adjustSiblingOrders(draggedItem.parent, session);
     }
 
+    // Update descendants levels if level changed
+    if (draggedItem.level !== newLevel) {
+      await updateDescendants(draggedId, newLevel, session);
+    }
+
+    await session.commitTransaction();
     res.status(200).json({ message: "Menu order updated successfully" });
   } catch (error) {
+    await session.abortTransaction();
     console.error("Error updating menu order:", error);
     res.status(500).json({ error: "Failed to update menu order" });
+  } finally {
+    session.endSession();
   }
 };
 
