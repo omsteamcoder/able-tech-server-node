@@ -14,7 +14,26 @@ const app = express();
 
 // Middleware
 app.use(express.json());
-app.use(cors());
+// Parse allowed origins from env
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",")
+  : [];
+
+// Configure CORS
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.indexOf(origin) === -1) {
+        const msg = `CORS policy: Origin ${origin} not allowed`;
+        return callback(new Error(msg), false);
+      }
+      return callback(null, true);
+    },
+    credentials: true,
+  })
+);
 
 // =======================
 // Import Routes
@@ -33,7 +52,7 @@ import pageRoutes from "./routes/pageRoutes.js";
 import subcategoryRoutes from "./routes/subcategoryRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
 import mailRoutes from "./routes/mailRoutes.js";
-import dashboardRoutes from "./routes/dashboardRoutes.js"
+import dashboardRoutes from "./routes/dashboardRoutes.js";
 import { debugFormData } from "./middleware/debugMiddleware.js";
 // =======================
 // Routes Middleware
@@ -59,7 +78,7 @@ app.use("/api/client-logo", clientLogoRoutes);
 app.use("/api/gallery", galleryRoutes);
 app.use("/api", fileRoutes);
 app.use("/api/mail", mailRoutes);
-app.use("/api/dashboard",dashboardRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 // Sections
 app.use("/api/section-one", sectionOneRoutes);
 
