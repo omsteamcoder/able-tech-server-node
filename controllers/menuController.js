@@ -50,7 +50,6 @@ export const createMenuItem = async (req, res) => {
       order,
     });
 
-    // FIX: Return consistent response format
     res.status(201).json({
       success: true,
       data: newItem,
@@ -62,12 +61,10 @@ export const createMenuItem = async (req, res) => {
     });
   }
 };
-// Enhanced updateMenuItem to handle hierarchy changes - FIXED
+
+// Enhanced updateMenuItem without transactions
 export const updateMenuItem = async (req, res) => {
   console.log("hehehjdsjdnksda ", req.body);
-
-  const session = await mongoose.startSession();
-  session.startTransaction();
 
   try {
     const { id, title, link, parent, level, order } = req.body;
@@ -76,7 +73,7 @@ export const updateMenuItem = async (req, res) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    const movedItem = await MenuItem.findById(id).session(session);
+    const movedItem = await MenuItem.findById(id);
     if (!movedItem) {
       return res.status(404).json({ message: "Item not found" });
     }
@@ -88,10 +85,10 @@ export const updateMenuItem = async (req, res) => {
         .json({ message: "Cannot set item as parent of its own descendant" });
     }
 
-    // FIX: Calculate correct level based on parent
+    // Calculate correct level based on parent
     let actualLevel = 0;
     if (parent) {
-      const parentItem = await MenuItem.findById(parent).session(session);
+      const parentItem = await MenuItem.findById(parent);
       actualLevel = parentItem ? parentItem.level + 1 : 0;
     }
 
@@ -102,37 +99,31 @@ export const updateMenuItem = async (req, res) => {
     const updatedItem = await MenuItem.findByIdAndUpdate(
       id,
       { title, link, parent: parent || null, level: actualLevel, order },
-      { new: true, session }
+      { new: true }
     );
 
     // Update descendants if parent or level changed
     if (parentChanged || levelChanged) {
-      await updateDescendants(updatedItem._id, updatedItem.level, session);
+      await updateDescendants(updatedItem._id, updatedItem.level);
     }
 
     // Adjust sibling orders
-    await adjustSiblingOrders(updatedItem.parent, session);
+    await adjustSiblingOrders(updatedItem.parent);
 
-    await session.commitTransaction();
     res.status(200).json({
-      success: true, // ADD THIS
+      success: true,
       data: updatedItem,
     });
   } catch (error) {
-    await session.abortTransaction();
-    res.status(500).json({ message: error.message });
-  } finally {
-    session.endSession();
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
-// menuController.js - UPDATE this function
-const updateChildLevelsAndParents = async (
-  parentId,
-  level,
-  children,
-  session
-) => {
+// Update child levels and parents without transactions
+const updateChildLevelsAndParents = async (parentId, level, children) => {
   if (!Array.isArray(children)) return;
 
   for (const child of children) {
@@ -147,21 +138,16 @@ const updateChildLevelsAndParents = async (
     );
 
     try {
-      // FIX: Calculate correct level based on parent
       const childLevel = level;
 
       // Update each child with new parent, level, order, and link
-      await MenuItem.findByIdAndUpdate(
-        child._id,
-        {
-          title: child.title,
-          parent: parentId,
-          level: childLevel,
-          order: child.order,
-          link: child.link,
-        },
-        { session }
-      );
+      await MenuItem.findByIdAndUpdate(child._id, {
+        title: child.title,
+        parent: parentId,
+        level: childLevel,
+        order: child.order,
+        link: child.link,
+      });
 
       console.log(
         `Updated child: ${child.title} (ID: ${child._id}) with Parent: ${parentId}, Level: ${childLevel}, Order: ${child.order}`
@@ -172,8 +158,7 @@ const updateChildLevelsAndParents = async (
         await updateChildLevelsAndParents(
           child._id,
           childLevel + 1,
-          child.children,
-          session
+          child.children
         );
       }
     } catch (error) {
@@ -205,94 +190,81 @@ const isCircularReference = async (itemId, potentialParentId) => {
   return false;
 };
 
-// Update descendants' levels
-const updateDescendants = async (parentId, parentLevel, session) => {
-  const children = await MenuItem.find({ parent: parentId }).session(session);
+// Update descendants' levels without transactions
+const updateDescendants = async (parentId, parentLevel) => {
+  const children = await MenuItem.find({ parent: parentId });
 
   for (const child of children) {
-    await MenuItem.findByIdAndUpdate(
-      child._id,
-      { level: parentLevel + 1 },
-      { session }
-    );
+    await MenuItem.findByIdAndUpdate(child._id, { level: parentLevel + 1 });
 
     // Recursively update grandchildren
-    await updateDescendants(child._id, parentLevel + 1, session);
+    await updateDescendants(child._id, parentLevel + 1);
   }
 };
 
 export const deleteMenuItem = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
-    const { id } = req.params; // Changed from req.query to req.params
+    const { id } = req.params;
 
     if (!id) {
       return res.status(400).json({ message: "Item ID is required" });
     }
 
     // Find the item and its descendants
-    const itemToDelete = await MenuItem.findById(id).session(session);
+    const itemToDelete = await MenuItem.findById(id);
     if (!itemToDelete) {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
     // Recursively delete all descendants
-    await deleteDescendants(id, session);
+    await deleteDescendants(id);
 
     // Delete the main item
-    await MenuItem.findByIdAndDelete(id, { session });
+    await MenuItem.findByIdAndDelete(id);
 
     // Adjust orders of remaining siblings
-    await adjustSiblingOrders(itemToDelete.parent, session);
+    await adjustSiblingOrders(itemToDelete.parent);
 
-    await session.commitTransaction();
     res.status(200).json({
-      success: true, // ADD THIS
+      success: true,
       message: "Menu item and its children deleted successfully",
     });
   } catch (error) {
-    await session.abortTransaction();
-    res.status(500).json({ message: error.message });
-  } finally {
-    session.endSession();
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
-// Recursively delete descendants
-const deleteDescendants = async (parentId, session) => {
-  const children = await MenuItem.find({ parent: parentId }).session(session);
+
+// Recursively delete descendants without transactions
+const deleteDescendants = async (parentId) => {
+  const children = await MenuItem.find({ parent: parentId });
 
   for (const child of children) {
-    await deleteDescendants(child._id, session);
-    await MenuItem.findByIdAndDelete(child._id, { session });
+    await deleteDescendants(child._id);
+    await MenuItem.findByIdAndDelete(child._id);
   }
 };
 
-// Adjust sibling orders after an item has been moved - ENHANCED
-const adjustSiblingOrders = async (parentId, session) => {
+// Adjust sibling orders after an item has been moved
+const adjustSiblingOrders = async (parentId) => {
   try {
-    const siblings = await MenuItem.find({ parent: parentId })
-      .sort({ order: 1 })
-      .session(session);
+    const siblings = await MenuItem.find({ parent: parentId }).sort({
+      order: 1,
+    });
 
     for (let i = 0; i < siblings.length; i++) {
-      await MenuItem.findByIdAndUpdate(
-        siblings[i]._id,
-        { order: i + 1 },
-        { session }
-      );
+      await MenuItem.findByIdAndUpdate(siblings[i]._id, { order: i + 1 });
     }
   } catch (error) {
     console.error("Error adjusting sibling orders:", error);
     throw error;
   }
 };
-// menuController.js - UPDATE updateMenuStructure function
-export const updateMenuStructure = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
 
+// Update menu structure without transactions
+export const updateMenuStructure = async (req, res) => {
   try {
     const { menu } = req.body;
     console.log("Received menu structure:", menu);
@@ -315,12 +287,10 @@ export const updateMenuStructure = async (req, res) => {
         }, Level: ${item.level}, Order: ${item.order}`
       );
 
-      // FIX: Validate level consistency
+      // Validate level consistency
       let actualLevel = 0;
       if (item.parent) {
-        const parentItem = await MenuItem.findById(item.parent).session(
-          session
-        );
+        const parentItem = await MenuItem.findById(item.parent);
         if (parentItem) {
           actualLevel = parentItem.level + 1;
         } else {
@@ -329,7 +299,7 @@ export const updateMenuStructure = async (req, res) => {
         }
       }
 
-      // FIX: Ensure level matches parent relationship
+      // Ensure level matches parent relationship
       if (item.parent && actualLevel !== item.level) {
         console.warn(
           `Correcting level for item ${item._id} from ${item.level} to ${actualLevel}`
@@ -337,17 +307,13 @@ export const updateMenuStructure = async (req, res) => {
       }
 
       // Update the item with the new parent relationship, order, level, and link
-      await MenuItem.findByIdAndUpdate(
-        item._id,
-        {
-          title: item.title,
-          parent: item.parent || null,
-          order: item.order,
-          level: actualLevel, // Use calculated level instead of provided level
-          link: item.link,
-        },
-        { session }
-      );
+      await MenuItem.findByIdAndUpdate(item._id, {
+        title: item.title,
+        parent: item.parent || null,
+        order: item.order,
+        level: actualLevel, // Use calculated level instead of provided level
+        link: item.link,
+      });
 
       console.log(
         `Updated item: ${item.title} (ID: ${item._id}) with Parent: ${
@@ -360,34 +326,26 @@ export const updateMenuStructure = async (req, res) => {
         await updateChildLevelsAndParents(
           item._id,
           actualLevel + 1,
-          item.children,
-          session
+          item.children
         );
       }
     }
 
-    await session.commitTransaction();
     res.status(200).json({
-      success: true, // ADD THIS for frontend validation
+      success: true,
       message: "Menu structure updated successfully",
     });
   } catch (error) {
-    await session.abortTransaction();
     console.error("Error updating menu structure:", error.message);
     res.status(500).json({
-      success: false, // ADD THIS for frontend validation
+      success: false,
       message: "Error updating menu structure",
       error: error.message,
     });
-  } finally {
-    session.endSession();
   }
 };
 
 export const updateMenuOrder = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const { draggedId, targetId, position } = req.body; // position: 'before', 'after', 'into'
 
@@ -395,8 +353,8 @@ export const updateMenuOrder = async (req, res) => {
       return res.status(400).json({ message: "Missing required parameters" });
     }
 
-    const draggedItem = await MenuItem.findById(draggedId).session(session);
-    const targetItem = await MenuItem.findById(targetId).session(session);
+    const draggedItem = await MenuItem.findById(draggedId);
+    const targetItem = await MenuItem.findById(targetId);
 
     if (!draggedItem || !targetItem) {
       return res.status(404).json({ message: "Menu item not found" });
@@ -412,9 +370,9 @@ export const updateMenuOrder = async (req, res) => {
         newParent = targetItem.parent;
         newLevel = targetItem.level;
         // Get siblings to calculate order
-        const siblings = await MenuItem.find({ parent: newParent })
-          .sort({ order: 1 })
-          .session(session);
+        const siblings = await MenuItem.find({ parent: newParent }).sort({
+          order: 1,
+        });
 
         const targetIndex = siblings.findIndex(
           (sib) => sib._id.toString() === targetId
@@ -428,7 +386,7 @@ export const updateMenuOrder = async (req, res) => {
         // Get children count for order
         const childrenCount = await MenuItem.countDocuments({
           parent: targetId,
-        }).session(session);
+        });
         newOrder = childrenCount;
         break;
 
@@ -437,54 +395,35 @@ export const updateMenuOrder = async (req, res) => {
     }
 
     // Update the dragged item
-    await MenuItem.findByIdAndUpdate(
-      draggedId,
-      {
-        parent: newParent,
-        level: newLevel,
-        order: newOrder,
-      },
-      { session }
-    );
+    await MenuItem.findByIdAndUpdate(draggedId, {
+      parent: newParent,
+      level: newLevel,
+      order: newOrder,
+    });
 
     // Reorder all affected items
-    await adjustSiblingOrders(newParent, session);
+    await adjustSiblingOrders(newParent);
     if (draggedItem.parent !== newParent) {
-      await adjustSiblingOrders(draggedItem.parent, session);
+      await adjustSiblingOrders(draggedItem.parent);
     }
 
     // Update descendants levels if level changed
     if (draggedItem.level !== newLevel) {
-      await updateDescendants(draggedId, newLevel, session);
+      await updateDescendants(draggedId, newLevel);
     }
 
-    await session.commitTransaction();
-    res.status(200).json({ message: "Menu order updated successfully" });
+    res.status(200).json({
+      success: true,
+      message: "Menu order updated successfully",
+    });
   } catch (error) {
-    await session.abortTransaction();
     console.error("Error updating menu order:", error);
-    res.status(500).json({ error: "Failed to update menu order" });
-  } finally {
-    session.endSession();
+    res.status(500).json({
+      success: false,
+      error: "Failed to update menu order",
+    });
   }
 };
-
-// export async function addPagesToMenu(pageIds) {
-//   // Fetch only the necessary fields (name and slug) for each page
-//   const pages = await Page.find({ _id: { $in: pageIds } }).select('name slug');
-
-//   // Map the fetched pages to create menu item objects
-//   const menuItems = pages.map((page, index) => ({
-//     name: page.name, // Use the page name as the menu item name
-//     // link: page.slug, // Use the page slug as the menu item link
-//     link: `${BASE_URL}${page.slug}`, // Use the page slug as the menu item link
-//     level: 0,        // Root level by default
-//     order: index,    // Preserve order based on selection
-//   }));
-
-//   // Insert the menu items into the MenuItem collection
-//   await MenuItem.insertMany(menuItems);
-// }
 
 export async function addPagesToMenu(pageIds) {
   // Fetch only the necessary fields (name and slug) for each page
@@ -514,13 +453,20 @@ export async function addPagesToMenuHandler(req, res) {
 
     if (!Array.isArray(pageIds) || pageIds.length === 0) {
       return res.status(400).json({
+        success: false,
         message: "Invalid request: pageIds must be a non-empty array",
       });
     }
 
     await addPagesToMenu(pageIds);
-    res.status(201).json({ message: "Menu items added successfully!" });
+    res.status(201).json({
+      success: true,
+      message: "Menu items added successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
   }
 }
